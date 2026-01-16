@@ -30,7 +30,7 @@ use {
     solana_stake_interface::{instruction::LockupArgs, state::Lockup},
     solana_tpu_client::{
         nonblocking::tpu_client::TpuClient,
-        tpu_client::{TpuClientConfig, DEFAULT_TPU_CONNECTION_POOL_SIZE},
+        tpu_client::TpuClientConfig,
     },
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_error::TransactionError,
@@ -944,94 +944,24 @@ pub async fn process_command(config: &CliConfig<'_>) -> ProcessResult {
             print_timestamp,
             compute_unit_price,
         } => {
-            let connection_cache = if config.use_tpu_client {
-                Some({
-                    #[cfg(feature = "dev-context-only-utils")]
-                    let cache = ConnectionCache::new_quic_for_tests(
-                        "connection_cache_cli_ping_quic",
-                        DEFAULT_TPU_CONNECTION_POOL_SIZE,
-                    );
-                    #[cfg(not(feature = "dev-context-only-utils"))]
-                    let cache = ConnectionCache::new_quic(
-                        "connection_cache_cli_ping_quic",
-                        DEFAULT_TPU_CONNECTION_POOL_SIZE,
-                    );
-                    cache
-                })
-            } else {
-                None
-            };
 
-            match connection_cache {
-                Some(ConnectionCache::Quic(cache)) => {
-                    let tpu_client = TpuClient::new_with_connection_cache(
-                        rpc_client.clone(),
-                        &config.websocket_url,
-                        TpuClientConfig::default(),
-                        cache,
-                    )
-                    .await
-                    .unwrap_or_else(|err| {
-                        eprintln!("Could not create TpuClient {err:?}");
-                        std::process::exit(1);
-                    });
+            // TODO: use tpu-client-next if config.use_tpu_client ? With which LeaderUpdater ?
 
-                    process_ping(
-                        Some(&tpu_client),
-                        config,
-                        interval,
-                        count,
-                        timeout,
-                        blockhash,
-                        *print_timestamp,
-                        *compute_unit_price,
-                        &rpc_client,
-                    )
-                    .await
-                }
-                Some(ConnectionCache::Udp(cache)) => {
-                    let tpu_client = TpuClient::new_with_connection_cache(
-                        rpc_client.clone(),
-                        &config.websocket_url,
-                        TpuClientConfig::default(),
-                        cache,
-                    )
-                    .await
-                    .unwrap_or_else(|err| {
-                        eprintln!("Could not create TpuClient {err:?}");
-                        std::process::exit(1);
-                    });
-
-                    process_ping(
-                        Some(&tpu_client),
-                        config,
-                        interval,
-                        count,
-                        timeout,
-                        blockhash,
-                        *print_timestamp,
-                        *compute_unit_price,
-                        &rpc_client,
-                    )
-                    .await
-                }
-                None => {
-                    use solana_quic_client::{QuicConfig, QuicConnectionManager, QuicPool};
-                    process_ping::<QuicPool, QuicConnectionManager, QuicConfig>(
-                        None,
-                        config,
-                        interval,
-                        count,
-                        timeout,
-                        blockhash,
-                        *print_timestamp,
-                        *compute_unit_price,
-                        &rpc_client,
-                    )
-                    .await
-                }
-            }
+            use solana_quic_client::{QuicConfig, QuicConnectionManager, QuicPool};
+            process_ping::<QuicPool, QuicConnectionManager, QuicConfig>(
+                None,
+                config,
+                interval,
+                count,
+                timeout,
+                blockhash,
+                *print_timestamp,
+                *compute_unit_price,
+                &rpc_client,
+            )
+            .await
         }
+
         CliCommand::Rent {
             data_length,
             use_lamports_unit,

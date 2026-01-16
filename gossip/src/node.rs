@@ -269,6 +269,9 @@ impl Node {
             )
             .collect();
 
+        let (_, udp_vote_client) =
+            bind_in_range_with_config(bind_ip_addr, port_range, socket_config).unwrap();
+
         let (_, quic_vote_client) =
             bind_in_range_with_config(bind_ip_addr, port_range, socket_config).unwrap();
 
@@ -352,6 +355,7 @@ impl Node {
             tpu_forwards_quic,
             tpu_vote_quic,
             tpu_vote_forwarding_client,
+            udp_vote_client,
             quic_vote_client,
             quic_alpenglow_client,
             tpu_transaction_forwarding_clients,

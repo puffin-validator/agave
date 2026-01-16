@@ -455,6 +455,21 @@ impl ClusterInfo {
         gossip_crds.get(*id).map(query)
     }
 
+    pub fn lookup_contact_infos(
+        &self,
+        ids: &Vec<Option<Pubkey>>,
+        mut query: impl FnMut(usize, &ContactInfo)
+    ) {
+        let gossip_crds = self.gossip.crds.read().unwrap();
+        for (idx, id) in ids.iter().enumerate() {
+            if let Some(id) = id {
+                if let Some(ci) = gossip_crds.get(*id) {
+                    query(idx, ci);
+                }
+            }
+        }
+    }
+
     pub fn lookup_contact_info_by_gossip_addr(
         &self,
         gossip_addr: &SocketAddr,
@@ -2393,7 +2408,9 @@ pub struct Sockets {
     pub tpu_transaction_forwarding_clients: Box<[UdpSocket]>,
     /// Socket for alpenglow consensus logic
     pub alpenglow: Option<UdpSocket>,
-    /// Connection cache endpoint for QUIC-based Vote
+    /// Socket for UDP-based Vote
+    pub udp_vote_client: UdpSocket,
+    /// Socket for QUIC-based Vote
     pub quic_vote_client: UdpSocket,
     /// Connection cache endpoint for QUIC-based Alpenglow messages
     pub quic_alpenglow_client: UdpSocket,

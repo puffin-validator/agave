@@ -32,6 +32,8 @@ use {
         },
         tpu::{ForwardingClientOption, Tpu, TpuSockets},
         tvu::{Tvu, TvuConfig, TvuSockets},
+        upcoming_leaders_cache::UpcomingLeadersCache,
+        voting_service,
     },
     agave_snapshots::{
         snapshot_archive_info::SnapshotArchiveInfoGetter as _, snapshot_config::SnapshotConfig,
@@ -47,7 +49,7 @@ use {
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         utils::move_and_async_delete_path_contents,
     },
-    solana_client::connection_cache::{ConnectionCache, Protocol},
+    solana_client::connection_cache::Protocol,
     solana_clock::Slot,
     solana_cluster_type::ClusterType,
     solana_entry::poh::compute_hash_time,
@@ -137,7 +139,8 @@ use {
         streamer::StakedNodes,
     },
     solana_time_utils::timestamp,
-    solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
+    solana_tpu_client::tpu_client::DEFAULT_VOTE_USE_QUIC,
+    solana_tpu_client_next::ClientBuilder,
     solana_turbine::{
         self,
         broadcast_stage::BroadcastStageType,
@@ -591,8 +594,6 @@ struct TransactionHistoryServices {
 pub struct ValidatorTpuConfig {
     /// Controls if to use QUIC for sending TPU votes
     pub vote_use_quic: bool,
-    /// Controls the connection cache pool size
-    pub tpu_connection_pool_size: usize,
     /// QUIC server config for regular TPU
     pub tpu_quic_server_config: SwQosQuicStreamerConfig,
     /// QUIC server config for TPU forward
@@ -635,7 +636,6 @@ impl ValidatorTpuConfig {
 
         ValidatorTpuConfig {
             vote_use_quic: DEFAULT_VOTE_USE_QUIC,
-            tpu_connection_pool_size: DEFAULT_TPU_CONNECTION_POOL_SIZE,
             tpu_quic_server_config,
             tpu_fwd_quic_server_config,
             vote_quic_server_config,
@@ -710,7 +710,6 @@ impl Validator {
 
         let ValidatorTpuConfig {
             vote_use_quic,
-            tpu_connection_pool_size,
             tpu_quic_server_config,
             tpu_fwd_quic_server_config,
             vote_quic_server_config,
@@ -1160,30 +1159,6 @@ impl Validator {
         let mut tpu_transactions_forwards_client_sockets =
             Some(node.sockets.tpu_transaction_forwarding_clients);
 
-        let vote_connection_cache = if vote_use_quic {
-            let vote_connection_cache = ConnectionCache::new_with_client_options(
-                "connection_cache_vote_quic",
-                tpu_connection_pool_size,
-                Some(node.sockets.quic_vote_client),
-                Some((
-                    &identity_keypair,
-                    node.info
-                        .tpu_vote(Protocol::QUIC)
-                        .ok_or_else(|| {
-                            ValidatorError::Other(String::from("Invalid QUIC address for TPU Vote"))
-                        })?
-                        .ip(),
-                )),
-                Some((&staked_nodes, &identity_keypair.pubkey())),
-            );
-            Arc::new(vote_connection_cache)
-        } else {
-            Arc::new(ConnectionCache::with_udp(
-                "connection_cache_vote_udp",
-                tpu_connection_pool_size,
-            ))
-        };
-
         // test-validator crate may start the validator in a tokio runtime
         // context which forces us to use the same runtime because a nested
         // runtime will cause panic at drop. Outside test-validator crate, we
@@ -1198,6 +1173,28 @@ impl Validator {
                 .build()
                 .unwrap()
         });
+        let runtime_handle = tpu_client_next_runtime
+            .as_ref()
+            .map(TokioRuntime::handle)
+            .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
+
+        let upcoming_leader_cache = Box::new(UpcomingLeadersCache::new(
+            poh_recorder.clone(),
+            cluster_info.clone(),
+            if vote_use_quic { Protocol::QUIC } else { Protocol::UDP }
+        ));
+
+        let vote_sender = if vote_use_quic {
+            let mut builder = ClientBuilder::new(upcoming_leader_cache)
+                .bind_socket(node.sockets.quic_vote_client)
+                .leader_send_fanout(voting_service::UPCOMING_LEADER_FANOUT)
+                .identity(Arc::as_ref(&identity_keypair));
+            builder = builder.runtime_handle(runtime_handle.clone());
+            let (sender, client) = builder.build()?;
+            voting_service::VoteSender::QUIC(sender, client)
+        } else {
+            voting_service::VoteSender::UDP(node.sockets.udp_vote_client, upcoming_leader_cache)
+        };
 
         let rpc_override_health_check =
             Arc::new(AtomicBool::new(config.rpc_config.disable_health_check));
@@ -1225,11 +1222,6 @@ impl Validator {
             };
 
             let rpc_tpu_client_args = {
-                let runtime_handle = tpu_client_next_runtime
-                    .as_ref()
-                    .map(TokioRuntime::handle)
-                    .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
-
                 RpcTpuClientArgs(
                     Arc::as_ref(&identity_keypair),
                     node.sockets.rpc_sts_client,
@@ -1633,7 +1625,7 @@ impl Validator {
             cluster_slots.clone(),
             wen_restart_repair_slots.clone(),
             slot_status_notifier,
-            vote_connection_cache,
+            vote_sender,
         )
         .map_err(ValidatorError::Other)?;
 
@@ -1659,10 +1651,6 @@ impl Validator {
 
         let key_notifiers = Arc::new(RwLock::new(KeyUpdaters::default()));
         let forwarding_tpu_client = {
-            let runtime_handle = tpu_client_next_runtime
-                .as_ref()
-                .map(TokioRuntime::handle)
-                .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
             ForwardingClientOption::TpuClientNext((
                 Arc::as_ref(&identity_keypair),
                 tpu_transactions_forwards_client_sockets.take().unwrap(),

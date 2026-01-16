@@ -59,6 +59,7 @@ pub mod vote_simulator;
 pub mod voting_service;
 pub mod warm_quic_cache_service;
 pub mod window_service;
+mod upcoming_leaders_cache;
 
 #[macro_use]
 extern crate log;

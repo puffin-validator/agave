@@ -24,6 +24,11 @@ pub trait LeaderUpdater: Send {
     /// only one estimated leader, there is a risk of losing all the transactions,
     /// depending on the forwarding policy.
     fn next_leaders(&mut self, lookahead_leaders: usize) -> Vec<SocketAddr>;
+    
+    /// Next leaders information can be updated upon request in `next_leaders`, but this can introduce unwanted
+    /// delays before tx can be sent. Instead, `update` can be called after tx is sent, or periodically, to
+    /// maximize the chance that the information is immediately available next time `next_leaders` is called.
+    fn update(&mut self) { }
 
     /// Stop [`LeaderUpdater`] and releases all associated resources.
     async fn stop(&mut self);

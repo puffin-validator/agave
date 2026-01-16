@@ -262,8 +262,6 @@ pub fn execute(
         value_t_or_exit!(matches, "accounts_shrink_optimize_total_space", bool);
     let vote_use_quic = value_t_or_exit!(matches, "vote_use_quic", bool);
 
-    let tpu_connection_pool_size = value_t_or_exit!(matches, "tpu_connection_pool_size", usize);
-
     let shrink_ratio = value_t_or_exit!(matches, "accounts_shrink_ratio", f64);
     if !(0.0..=1.0).contains(&shrink_ratio) {
         Err(format!(
@@ -1024,7 +1022,6 @@ pub fn execute(
         run_args.socket_addr_space,
         ValidatorTpuConfig {
             vote_use_quic,
-            tpu_connection_pool_size,
             tpu_quic_server_config,
             tpu_fwd_quic_server_config,
             vote_quic_server_config,
