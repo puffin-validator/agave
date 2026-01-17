@@ -23,7 +23,7 @@ pub struct UpcomingLeadersCache {
     poh_recorder: Arc<RwLock<PohRecorder>>,
     cluster_info: Arc<ClusterInfo>,
     /// First window contained in the cache, inclusive
-    /// If greater or equal to window_end, the cache is empty.
+    /// If greater or equal than window_end, the cache is empty.
     window_start: Slot,
     /// Last window contained in the cache, exclusive
     window_end: Slot,
@@ -78,8 +78,8 @@ impl UpcomingLeadersCache {
                 break;
             }
         }
-        self.window_end = window;
         drop(poh_recorder);
+        self.window_end = window;
         self.cluster_info.lookup_contact_infos(&leaders, |idx, node| {
             self.buf[((from_window + idx as u64) % BUF_SIZE_WINDOWS) as usize] = node.tpu_vote(self.protocol);
         });
