@@ -18,6 +18,7 @@ use {
             ExternalRootSource, Tower,
         },
         forwarding_stage::ForwardingClientConfig,
+        next_leader::VotingServiceLeaderUpdater,
         repair::{
             self,
             quic_endpoint::{RepairQuicAsyncSenders, RepairQuicSenders, RepairQuicSockets},
@@ -33,6 +34,7 @@ use {
         },
         tpu::{Tpu, TpuSockets},
         tvu::{AlpenglowInitializationState, Tvu, TvuConfig, TvuSockets},
+        voting_service,
     },
     agave_snapshots::{
         snapshot_archive_info::SnapshotArchiveInfoGetter as _, snapshot_config::SnapshotConfig,
@@ -53,7 +55,7 @@ use {
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         utils::move_and_async_delete_path_contents,
     },
-    solana_client::connection_cache::{ConnectionCache, Protocol},
+    solana_client::connection_cache::ConnectionCache,
     solana_clock::Slot,
     solana_cluster_type::ClusterType,
     solana_entry::poh::compute_hash_time,
@@ -144,6 +146,7 @@ use {
     },
     solana_time_utils::timestamp,
     solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
+    solana_tpu_client_next::ClientBuilder,
     solana_turbine::{
         self,
         broadcast_stage::BroadcastStageType,
@@ -1205,29 +1208,10 @@ impl Validator {
         let mut tpu_transactions_forwards_client_sockets =
             Some(node.sockets.tpu_transaction_forwarding_clients);
 
-        let vote_connection_cache = if vote_use_quic {
-            let vote_connection_cache = ConnectionCache::new_with_client_options(
-                "connection_cache_vote_quic",
-                tpu_connection_pool_size,
-                Some(node.sockets.quic_vote_client),
-                Some((
-                    &identity_keypair,
-                    node.info
-                        .tpu_vote(Protocol::QUIC)
-                        .ok_or_else(|| {
-                            ValidatorError::Other(String::from("Invalid QUIC address for TPU Vote"))
-                        })?
-                        .ip(),
-                )),
-                Some((&staked_nodes, &identity_keypair.pubkey())),
-            );
-            Arc::new(vote_connection_cache)
-        } else {
-            Arc::new(ConnectionCache::with_udp(
-                "connection_cache_vote_udp",
-                tpu_connection_pool_size,
-            ))
-        };
+        let udp_vote_connection_cache = Arc::new(ConnectionCache::with_udp(
+            "connection_cache_vote_udp",
+            tpu_connection_pool_size,
+        ));
 
         let bls_connection_cache = Arc::new(ConnectionCache::new_with_client_options(
             "connection_cache_bls_quic",
@@ -1268,6 +1252,38 @@ impl Validator {
                 .build()
                 .unwrap()
         });
+        let runtime_handle = tpu_client_next_runtime
+            .as_ref()
+            .map(TokioRuntime::handle)
+            .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
+
+        let quic_vote_sender = if vote_use_quic {
+            let leader_updater = Box::new(VotingServiceLeaderUpdater::new(
+                cluster_info.clone(),
+                poh_recorder.clone(),
+            ));
+            let builder = ClientBuilder::new(leader_updater)
+                .bind_socket(node.sockets.quic_vote_client)
+                .leader_send_fanout(voting_service::QUIC_UPCOMING_LEADER_FANOUT_LEADERS)
+                .identity(Arc::as_ref(&identity_keypair))
+                .metric_reporter(|stats, cancel| {
+                    stats.report_to_influxdb("vote_client_quic", Duration::from_millis(400), cancel)
+                })
+                .runtime_handle(runtime_handle.clone());
+            let (sender, client) = builder.build()?;
+            let client = Arc::new(client);
+            let quic_vote_sender = voting_service::QuicVoteSender {
+                sender,
+                client: client.clone(),
+            };
+            key_notifiers
+                .write()
+                .unwrap()
+                .add(KeyUpdaterType::VoteClient, client);
+            Some(quic_vote_sender)
+        } else {
+            None
+        };
 
         let rpc_override_health_check =
             Arc::new(AtomicBool::new(config.rpc_config.disable_health_check));
@@ -1295,11 +1311,6 @@ impl Validator {
             };
 
             let rpc_tpu_client_args = {
-                let runtime_handle = tpu_client_next_runtime
-                    .as_ref()
-                    .map(TokioRuntime::handle)
-                    .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
-
                 RpcTpuClientArgs(
                     Arc::as_ref(&identity_keypair),
                     node.sockets.rpc_sts_client,
@@ -1703,7 +1714,8 @@ impl Validator {
             cluster_slots.clone(),
             wen_restart_repair_slots.clone(),
             slot_status_notifier,
-            vote_connection_cache,
+            udp_vote_connection_cache,
+            quic_vote_sender,
             AlpenglowInitializationState {
                 leader_window_info_sender,
                 replay_highest_frozen: replay_highest_frozen.clone(),
