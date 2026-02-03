@@ -690,10 +690,11 @@ pub struct Validator {
     repair_quic_endpoints_runtime: Option<TokioRuntime>,
     repair_quic_endpoints_join_handle: Option<repair::quic_endpoint::AsyncTryJoinHandle>,
     xdp_retransmitter: Option<XdpRetransmitter>,
-    // This runtime is used to run the client owned by SendTransactionService.
-    // We don't wait for its JoinHandle here because ownership and shutdown
-    // are managed elsewhere. This variable is intentionally unused.
-    _tpu_client_next_runtime: Option<TokioRuntime>,
+    // These runtimes are used to run the clients owned by SendTransactionService.
+    // We don't wait for their JoinHandle here because ownership and shutdown
+    // are managed elsewhere. These variables are intentionally unused.
+    _rpc_fwd_tpu_client_next_runtime: Option<TokioRuntime>,
+    _quic_vote_tpu_client_next_runtime: Option<TokioRuntime>,
 }
 
 impl Validator {
@@ -1244,20 +1245,32 @@ impl Validator {
         // always need a tokio runtime (and the respective handle) to initialize
         // the QUIC endpoints.
         let current_runtime_handle = tokio::runtime::Handle::try_current();
-        let tpu_client_next_runtime = current_runtime_handle.is_err().then(|| {
+        let rpc_fwd_tpu_client_next_runtime = current_runtime_handle.is_err().then(|| {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(2)
-                .thread_name("solTpuClientRt")
+                .thread_name("solRpcFwdRt")
                 .build()
                 .unwrap()
         });
-        let runtime_handle = tpu_client_next_runtime
+        let rpc_fwd_tpu_client_next_runtime_handle = rpc_fwd_tpu_client_next_runtime
             .as_ref()
             .map(TokioRuntime::handle)
             .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
 
-        let quic_vote_sender = if vote_use_quic {
+        let (quic_vote_sender, quic_vote_tpu_client_next_runtime) = if vote_use_quic {
+            let rt = current_runtime_handle.is_err().then(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(2)
+                    .thread_name("solQuicVoteRt")
+                    .build()
+                    .unwrap()
+            });
+            let rt_handle = rt
+                .as_ref()
+                .map(TokioRuntime::handle)
+                .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
             let leader_updater = Box::new(VotingServiceLeaderUpdater::new(
                 cluster_info.clone(),
                 poh_recorder.clone(),
@@ -1269,7 +1282,7 @@ impl Validator {
                 .metric_reporter(|stats, cancel| {
                     stats.report_to_influxdb("vote_client_quic", Duration::from_millis(400), cancel)
                 })
-                .runtime_handle(runtime_handle.clone());
+                .runtime_handle(rt_handle.clone());
             let (sender, client) = builder.build()?;
             let client = Arc::new(client);
             let quic_vote_sender = voting_service::QuicVoteSender {
@@ -1280,9 +1293,9 @@ impl Validator {
                 .write()
                 .unwrap()
                 .add(KeyUpdaterType::VoteClient, client);
-            Some(quic_vote_sender)
+            (Some(quic_vote_sender), rt)
         } else {
-            None
+            (None, None)
         };
 
         let rpc_override_health_check =
@@ -1314,7 +1327,7 @@ impl Validator {
                 RpcTpuClientArgs(
                     Arc::as_ref(&identity_keypair),
                     node.sockets.rpc_sts_client,
-                    runtime_handle.clone(),
+                    rpc_fwd_tpu_client_next_runtime_handle.clone(),
                     cancel.clone(),
                 )
             };
@@ -1752,14 +1765,10 @@ impl Validator {
         }
 
         let tpu_forwaring_client_config = {
-            let runtime_handle = tpu_client_next_runtime
-                .as_ref()
-                .map(TokioRuntime::handle)
-                .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
             ForwardingClientConfig {
                 stake_identity: Arc::as_ref(&identity_keypair),
                 tpu_client_sockets: tpu_transactions_forwards_client_sockets.take().unwrap(),
-                runtime_handle: runtime_handle.clone(),
+                runtime_handle: rpc_fwd_tpu_client_next_runtime_handle.clone(),
                 cancel: cancel.clone(),
                 node_multihoming: node_multihoming.clone(),
             }
@@ -1888,7 +1897,8 @@ impl Validator {
             repair_quic_endpoints_runtime,
             repair_quic_endpoints_join_handle,
             xdp_retransmitter,
-            _tpu_client_next_runtime: tpu_client_next_runtime,
+            _rpc_fwd_tpu_client_next_runtime: rpc_fwd_tpu_client_next_runtime,
+            _quic_vote_tpu_client_next_runtime: quic_vote_tpu_client_next_runtime,
         })
     }
 
