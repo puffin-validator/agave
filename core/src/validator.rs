@@ -1284,15 +1284,11 @@ impl Validator {
                 })
                 .runtime_handle(rt_handle.clone());
             let (sender, client) = builder.build()?;
-            let client = Arc::new(client);
-            let quic_vote_sender = voting_service::QuicVoteSender {
-                sender,
-                client: client.clone(),
-            };
+            let quic_vote_sender = voting_service::QuicVoteSender(sender);
             key_notifiers
                 .write()
                 .unwrap()
-                .add(KeyUpdaterType::VoteClient, client);
+                .add(KeyUpdaterType::VoteClient, Arc::new(client));
             (Some(quic_vote_sender), rt)
         } else {
             (None, None)

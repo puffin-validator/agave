@@ -11,7 +11,7 @@ use {
     solana_gossip::cluster_info::ClusterInfo,
     solana_measure::measure::Measure,
     solana_poh::poh_recorder::PohRecorder,
-    solana_tpu_client_next::{Client, TransactionSender},
+    solana_tpu_client_next::TransactionSender,
     solana_transaction::Transaction,
     solana_transaction_error::TransportError,
     std::{
@@ -32,10 +32,7 @@ const UDP_UPCOMING_LEADER_FANOUT_SLOTS: u64 =
 #[cfg(test)]
 static_assertions::const_assert_eq!(UDP_UPCOMING_LEADER_FANOUT_SLOTS, 3);
 
-pub struct QuicVoteSender {
-    pub sender: TransactionSender,
-    pub client: Arc<Client>,
-}
+pub struct QuicVoteSender(pub TransactionSender);
 
 pub enum VoteOp {
     PushVote {
@@ -165,7 +162,7 @@ impl VotingService {
         if let Some(quic_sender) = quic_sender {
             if let Ok(serialized) = serialize(vote_op.tx()) {
                 if let Err(e) = quic_sender
-                    .sender
+                    .0
                     .try_send_transactions_in_batch(vec![serialized])
                 {
                     warn!("Error sending vote transaction with QUIC: {e}");
